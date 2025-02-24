@@ -1,0 +1,152 @@
+#!/bin/bash
+
+echo "🎉 Welcome to 'Cloning with Fun!' 🖥️🔄"
+echo "🚀 Fast. Safe. Clone your drives with ease!"
+echo ""
+
+# Function to scan for available drives and partitions
+scan_drives() {
+    echo "🔍 Scanning for available drives and partitions..."
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E "disk|part"
+}
+
+# Function to check if a drive exists
+drive_exists() {
+    local drive=$1
+    lsblk -nr -o NAME | grep -qw "$drive"
+}
+
+# Function to ask user for input with an exit option
+ask_user() {
+    local prompt="$1"
+    read -p "$prompt (or type 'exit' to quit): " user_input
+    if [[ "$user_input" == "exit" ]]; then
+        echo "👋 Exiting. Goodbye!"
+        exit 0
+    fi
+    echo "$user_input"
+}
+
+# Function to get user input for target drives
+get_target_drives() {
+    while true; do
+        scan_drives
+        target_drives=$(ask_user "Enter the TARGET drive(s) (e.g., sdb sdc sdd)")
+
+        IFS=' ' read -r -a target_array <<< "$target_drives"
+        valid_targets=()
+        
+        for drive in "${target_array[@]}"; do
+            if ! drive_exists "$drive"; then
+                echo "❌ ERROR: Drive /dev/$drive not found! Try again."
+                continue 2  # Restart input
+            fi
+            valid_targets+=("$drive")
+        done
+        break  # Exit loop once all targets are valid
+    done
+}
+
+# Function to fully wipe a target drive before cloning
+wipe_drive() {
+    local drive=$1
+    echo "⚠️ WARNING: You are about to ERASE ALL DATA on /dev/$drive!"
+    confirm=$(ask_user "Are you sure? (yes/no)")
+    if [[ "$confirm" != "yes" ]]; then
+        echo "❌ Operation canceled."
+        return
+    fi
+
+    # Ask for the secure wipe method
+    echo "Choose a secure erase method:"
+    echo "1) Overwrite with zeroes (Fast, but not fully secure)"
+    echo "2) Secure wipe with multiple random passes (More secure, but slow)"
+    wipe_choice=$(ask_user "Enter choice (1 or 2)")
+    
+    if [[ "$wipe_choice" == "1" ]]; then
+        echo "🛑 Securely erasing **entire** /dev/$drive with dd (zero-fill)..."
+        sudo dd if=/dev/zero of=/dev/$drive bs=1M status=progress
+    elif [[ "$wipe_choice" == "2" ]]; then
+        echo "🔒 Securely erasing /dev/$drive with **shred** (3-pass random data)..."
+        sudo shred -v -n 3 /dev/$drive
+    else
+        echo "❌ Invalid choice. Skipping wipe."
+        return
+    fi
+
+    echo "✅ Erasure complete for /dev/$drive!"
+}
+
+# Function to get user input for source drive
+get_source_drive() {
+    while true; do
+        scan_drives
+        source_drive=$(ask_user "Enter the SOURCE drive name (e.g., sda)")
+
+        if ! drive_exists "$source_drive"; then
+            echo "❌ ERROR: Drive /dev/$source_drive not found! Try again."
+        else
+            break  # Valid source drive
+        fi
+    done
+}
+
+# Function to clone a full drive (ALL partitions) to multiple drives
+clone_drive() {
+    local source_drive=$1
+    shift  # Remove first argument (source drive)
+
+    echo "⚠️ WARNING: You are about to CLONE /dev/$source_drive to:"
+    for target_drive in "$@"; do
+        echo "   ➡️ /dev/$target_drive"
+    done
+    confirm=$(ask_user "Are you sure? (yes/no)")
+    if [[ "$confirm" != "yes" ]]; then
+        echo "❌ Operation canceled."
+        return
+    fi
+
+    for target_drive in "$@"; do
+        echo "🛠️ Copying partition table from $source_drive to $target_drive..."
+        sudo sfdisk --dump /dev/$source_drive | sudo sfdisk /dev/$target_drive
+
+        echo "🔄 Using **dd** to clone entire drive /dev/$source_drive ➡️ /dev/$target_drive..."
+        sudo dd if=/dev/$source_drive of=/dev/$target_drive bs=4M status=progress &
+    done
+
+    wait  # Ensures all cloning processes finish before continuing
+    echo "✅ Cloning process completed!"
+}
+
+# Main loop
+while true; do
+    clone_choice=$(ask_user "🛠️ Do you want to clone a drive? (yes/no)")
+    if [[ "$clone_choice" != "yes" ]]; then
+        echo "👋 Goodbye!"
+        exit 0
+    fi
+
+    # Step 1: Select target drives first
+    get_target_drives
+
+    # Step 2: Ask if user wants to wipe target drives
+    erase_choice=$(ask_user "🧹 Do you want to erase and prepare the target drives? (yes/no)")
+    if [[ "$erase_choice" == "yes" ]]; then
+        for drive in "${valid_targets[@]}"; do
+            wipe_drive $drive
+        done
+    fi
+
+    # Step 3: Select source drive
+    get_source_drive
+
+    # Step 4: Start cloning process
+    clone_drive "$source_drive" "${valid_targets[@]}"
+
+    # Ask if user wants to run again
+    restart_choice=$(ask_user "🔄 Do you want to start another cloning session? (yes/no)")
+    if [[ "$restart_choice" != "yes" ]]; then
+        echo "👋 Goodbye!"
+        exit 0
+    fi
+done
